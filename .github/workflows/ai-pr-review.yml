@@ -1,0 +1,56 @@
+name: AI PR Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: ai-pr-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  start-review:
+    # Skip drafts and fork PRs (forks can't get an OIDC token for this repo's role anyway).
+    if: >-
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: ai-pr-review-${{ github.run_id }}
+
+      - name: Start pr-review execution
+        env:
+          SFN_ARN: ${{ vars.PR_REVIEW_SFN_ARN }}
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ github.event.repository.name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          # Execution names allow [A-Za-z0-9-_] only, max 80 chars; this is the idempotency key.
+          safe_repo="${REPO//[^A-Za-z0-9_-]/-}"
+          name="${safe_repo:0:60}-${PR_NUMBER}-${HEAD_SHA:0:12}"
+          input="$(jq -nc --arg o "$OWNER" --arg r "$REPO" --argjson n "$PR_NUMBER" --arg s "$HEAD_SHA" \
+            '{owner: $o, repo: $r, prNumber: $n, headSha: $s}')"
+
+          if out="$(aws stepfunctions start-execution --state-machine-arn "$SFN_ARN" \
+                      --name "$name" --input "$input" --output json 2>&1)"; then
+            echo "$out"
+            echo "### AI review started: \`$name\`" >> "$GITHUB_STEP_SUMMARY"
+          elif grep -q 'ExecutionAlreadyExists' <<<"$out"; then
+            echo "Execution $name already exists; nothing to do."
+            echo "### AI review already running/ran: \`$name\`" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "$out" >&2
+            exit 1
+          fi
