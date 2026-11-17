@@ -19,7 +19,7 @@ jobs:
       github.event.pull_request.draft == false &&
       github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 20
     steps:
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
@@ -29,6 +29,7 @@ jobs:
           role-session-name: ai-pr-review-${{ github.run_id }}
 
       - name: Start pr-review execution
+        id: start
         env:
           SFN_ARN: ${{ vars.PR_REVIEW_SFN_ARN }}
           OWNER: ${{ github.repository_owner }}
@@ -43,6 +44,7 @@ jobs:
           input="$(jq -nc --arg o "$OWNER" --arg r "$REPO" --argjson n "$PR_NUMBER" --arg s "$HEAD_SHA" \
             '{owner: $o, repo: $r, prNumber: $n, headSha: $s}')"
 
+          echo "name=$name" >> "$GITHUB_OUTPUT"
           if out="$(aws stepfunctions start-execution --state-machine-arn "$SFN_ARN" \
                       --name "$name" --input "$input" --output json 2>&1)"; then
             echo "$out"
@@ -52,5 +54,25 @@ jobs:
             echo "### AI review already running/ran: \`$name\`" >> "$GITHUB_STEP_SUMMARY"
           else
             echo "$out" >&2
+            exit 1
+          fi
+
+      # Fails this job when the review fails, so the PR shows it even if GitHub rejects the Check Run.
+      - name: Wait for review result
+        env:
+          SFN_ARN: ${{ vars.PR_REVIEW_SFN_ARN }}
+          NAME: ${{ steps.start.outputs.name }}
+        run: |
+          set -euo pipefail
+          exec_arn="${SFN_ARN/:stateMachine:/:execution:}:${NAME}"
+          while :; do
+            status="$(aws stepfunctions describe-execution --execution-arn "$exec_arn" --query status --output text)"
+            [ "$status" != "RUNNING" ] && break
+            sleep 15
+          done
+          echo "### AI review: \`$status\`" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$status" != "SUCCEEDED" ]; then
+            aws stepfunctions describe-execution --execution-arn "$exec_arn" --query '{error: error, cause: cause}' >&2
+            echo "::error title=AI review $status::Execution $NAME ended $status; see the step output above."
             exit 1
           fi
