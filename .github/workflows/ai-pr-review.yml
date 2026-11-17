@@ -40,9 +40,24 @@ jobs:
           set -euo pipefail
           # Execution names allow [A-Za-z0-9-_] only, max 80 chars; this is the idempotency key.
           safe_repo="${REPO//[^A-Za-z0-9_-]/-}"
-          name="${safe_repo:0:60}-${PR_NUMBER}-${HEAD_SHA:0:12}"
+          name="${safe_repo:0:50}-${PR_NUMBER}-${HEAD_SHA:0:12}"
           input="$(jq -nc --arg o "$OWNER" --arg r "$REPO" --argjson n "$PR_NUMBER" --arg s "$HEAD_SHA" \
             '{owner: $o, repo: $r, prNumber: $n, headSha: $s}')"
+          exec_arn() { echo "${SFN_ARN/:stateMachine:/:execution:}:$1"; }
+
+          # A finished run for this commit that didn't succeed (e.g. PR reopened after a fix) gets a fresh
+          # execution; a running or succeeded one is reused, so duplicates never post twice.
+          if prev="$(aws stepfunctions describe-execution --execution-arn "$(exec_arn "$name")" \
+                       --query status --output text 2>/dev/null)"; then
+            if [ "$prev" = "RUNNING" ] || [ "$prev" = "SUCCEEDED" ]; then
+              echo "Execution $name is $prev; reusing it."
+              echo "### AI review already $prev: \`$name\`" >> "$GITHUB_STEP_SUMMARY"
+              echo "name=$name" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "Previous execution $name ended $prev; starting a new one."
+            name="${name}-r${GITHUB_RUN_ID: -6}${GITHUB_RUN_ATTEMPT}"
+          fi
 
           echo "name=$name" >> "$GITHUB_OUTPUT"
           if out="$(aws stepfunctions start-execution --state-machine-arn "$SFN_ARN" \
