@@ -1,26 +1,72 @@
 name: AI PR Review
 
+# Runs on every push to a PR. To review again on demand, comment `/ai-review` on the PR
+# (collaborators only) or use Actions -> AI PR Review -> Run workflow with the PR number.
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: PR number to review
+        required: true
+        type: number
 
 permissions:
   id-token: write
   contents: read
-
-concurrency:
-  group: ai-pr-review-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
+  pull-requests: write # read the PR for comment/manual runs, react to the /ai-review comment
 
 jobs:
   start-review:
-    # Skip drafts and fork PRs (forks can't get an OIDC token for this repo's role anyway).
+    # pull_request: skip drafts and fork PRs (forks can't get an OIDC token for this repo's role anyway).
+    # issue_comment: only `/ai-review` on a PR, from someone with write access.
     if: >-
-      github.event.pull_request.draft == false &&
-      github.event.pull_request.head.repo.full_name == github.repository
+      (github.event_name == 'pull_request' &&
+        github.event.pull_request.draft == false &&
+        github.event.pull_request.head.repo.full_name == github.repository) ||
+      (github.event_name == 'issue_comment' &&
+        github.event.issue.pull_request &&
+        startsWith(github.event.comment.body, '/ai-review') &&
+        contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)) ||
+      github.event_name == 'workflow_dispatch'
+    # Job-level so unrelated PR comments (skipped runs) never cancel a running review.
+    concurrency:
+      group: ai-pr-review-${{ github.event.pull_request.number || github.event.issue.number || inputs.pr_number }}
+      cancel-in-progress: true
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
+      - name: Resolve PR
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number || inputs.pr_number }}
+        run: |
+          set -euo pipefail
+          pr="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER")"
+          if [ "$(jq -r .head.repo.full_name <<<"$pr")" != "$GITHUB_REPOSITORY" ]; then
+            echo "::error::PR #$PR_NUMBER comes from a fork; not reviewing it."
+            exit 1
+          fi
+          echo "number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+          echo "sha=$(jq -r .head.sha <<<"$pr")" >> "$GITHUB_OUTPUT"
+          # Comment and manual runs always post a fresh review, even if this commit already has one.
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            echo "force=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "force=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Acknowledge /ai-review
+        if: github.event_name == 'issue_comment'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMMENT_ID: ${{ github.event.comment.id }}
+        run: gh api "repos/$GITHUB_REPOSITORY/issues/comments/$COMMENT_ID/reactions" -f content=eyes >/dev/null
+
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
@@ -34,22 +80,23 @@ jobs:
           SFN_ARN: ${{ vars.PR_REVIEW_SFN_ARN }}
           OWNER: ${{ github.repository_owner }}
           REPO: ${{ github.event.repository.name }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          HEAD_SHA: ${{ steps.pr.outputs.sha }}
+          FORCE: ${{ steps.pr.outputs.force }}
         run: |
           set -euo pipefail
           # Execution names allow [A-Za-z0-9-_] only, max 80 chars; this is the idempotency key.
           safe_repo="${REPO//[^A-Za-z0-9_-]/-}"
           name="${safe_repo:0:50}-${PR_NUMBER}-${HEAD_SHA:0:12}"
           input="$(jq -nc --arg o "$OWNER" --arg r "$REPO" --argjson n "$PR_NUMBER" --arg s "$HEAD_SHA" \
-            '{owner: $o, repo: $r, prNumber: $n, headSha: $s}')"
+            --argjson f "$FORCE" '{owner: $o, repo: $r, prNumber: $n, headSha: $s, force: $f}')"
           exec_arn() { echo "${SFN_ARN/:stateMachine:/:execution:}:$1"; }
 
-          # A finished run for this commit that didn't succeed (e.g. PR reopened after a fix) gets a fresh
-          # execution; a running or succeeded one is reused, so duplicates never post twice.
+          # A finished run for this commit that didn't succeed (e.g. PR reopened after a fix), or any finished
+          # run when forced (/ai-review, manual), gets a fresh execution; otherwise the existing one is reused.
           if prev="$(aws stepfunctions describe-execution --execution-arn "$(exec_arn "$name")" \
                        --query status --output text 2>/dev/null)"; then
-            if [ "$prev" = "RUNNING" ] || [ "$prev" = "SUCCEEDED" ]; then
+            if [ "$prev" = "RUNNING" ] || { [ "$prev" = "SUCCEEDED" ] && [ "$FORCE" = "false" ]; }; then
               echo "Execution $name is $prev; reusing it."
               echo "### AI review already $prev: \`$name\`" >> "$GITHUB_STEP_SUMMARY"
               echo "name=$name" >> "$GITHUB_OUTPUT"
