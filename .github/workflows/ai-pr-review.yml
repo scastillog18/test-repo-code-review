@@ -1,10 +1,12 @@
 name: AI PR Review
 
-# Runs on every push to a PR. To review again on demand, comment `/ai-review` on the PR
-# (collaborators only) or use Actions -> AI PR Review -> Run workflow with the PR number.
+# Runs on every push to a PR, and again when the PR's title, description or base branch is edited
+# (the title and description are review input; the base branch decides the policy and whether the PR
+# targets production). To review again on demand, comment `/ai-review` on the PR (collaborators only)
+# or use Actions -> AI PR Review -> Run workflow with the PR number.
 on:
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
+    types: [opened, synchronize, reopened, ready_for_review, edited]
   issue_comment:
     types: [created]
   workflow_dispatch:
@@ -22,11 +24,14 @@ permissions:
 jobs:
   start-review:
     # pull_request: skip drafts and fork PRs (forks can't get an OIDC token for this repo's role anyway).
+    #   `edited` runs only when the title, description or base branch changed, not for other metadata.
     # issue_comment: only `/ai-review` on a PR, from someone with write access.
     if: >-
       (github.event_name == 'pull_request' &&
         github.event.pull_request.draft == false &&
-        github.event.pull_request.head.repo.full_name == github.repository) ||
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        (github.event.action != 'edited' ||
+          github.event.changes.title || github.event.changes.body || github.event.changes.base)) ||
       (github.event_name == 'issue_comment' &&
         github.event.issue.pull_request &&
         startsWith(github.event.comment.body, '/ai-review') &&
@@ -44,6 +49,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number || inputs.pr_number }}
+          EVENT_ACTION: ${{ github.event.action }}
         run: |
           set -euo pipefail
           pr="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER")"
@@ -53,8 +59,9 @@ jobs:
           fi
           echo "number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
           echo "sha=$(jq -r .head.sha <<<"$pr")" >> "$GITHUB_OUTPUT"
-          # Comment and manual runs always post a fresh review, even if this commit already has one.
-          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+          # Comment, manual and edit runs always post a fresh review, even if this commit already has one
+          # (an edit doesn't change the head SHA, so a non-forced run would just reuse the finished one).
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ] && [ "$EVENT_ACTION" != "edited" ]; then
             echo "force=false" >> "$GITHUB_OUTPUT"
           else
             echo "force=true" >> "$GITHUB_OUTPUT"
