@@ -1,2 +1,6 @@
 .vscode/
 .codemie/
+.venv/
+__pycache__/
+*.pyc
+*.db
