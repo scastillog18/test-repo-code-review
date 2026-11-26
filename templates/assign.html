@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block title %}Assign Task — TaskFlow{% endblock %}
+
+{% block content %}
+<h1>Assign Task</h1>
+
+<section>
+  <!-- User avatar without alt text -->
+  <img src="/static/avatar.png" width="64" height="64">
+
+  <div class="field">
+    <!-- Input has no associated label -->
+    <input type="text" name="note" placeholder="Assignment note">
+  </div>
+
+  <div class="field">
+    <label for="assignee">Assignee</label>
+    <select id="assignee" name="assignee_id">
+      <option value="">Select a user…</option>
+    </select>
+  </div>
+
+  <!-- Non-semantic clickable div instead of a button -->
+  <div onclick="submitAssign()" style="cursor:pointer; background:#2563eb; color:white; padding:0.5rem 1rem; display:inline-block;">
+    Assign Task
+  </div>
+</section>
+
+<script>
+  fetch('/users')
+    .then(r => r.json())
+    .then(users => {
+      const sel = document.querySelector('select[name=assignee_id]');
+      users.forEach(u => {
+        const opt = document.createElement('option');
+        opt.value = u.id;
+        opt.textContent = u.name;
+        sel.appendChild(opt);
+      });
+    });
+
+  function submitAssign() {
+    const taskId = new URLSearchParams(window.location.search).get('task_id');
+    const assigneeId = document.querySelector('select[name=assignee_id]').value;
+    const note = document.querySelector('input[name=note]').value;
+    fetch(`/tasks/${taskId}/assign`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ assignee_id: assigneeId, note }),
+    }).then(() => window.location.href = '/');
+  }
+</script>
+{% endblock %}

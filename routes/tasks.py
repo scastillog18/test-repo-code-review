@@ -1,5 +1,7 @@
+import sqlite3
 from flask import Blueprint, jsonify, request
 from db import get_connection
+from config import Config
 
 bp = Blueprint("tasks", __name__)
 
@@ -71,3 +73,31 @@ def delete_task(task_id: int):
     if cur.rowcount == 0:
         return jsonify({"error": "task not found"}), 404
     return jsonify({"deleted": True})
+
+
+@bp.post("/tasks/<int:task_id>/assign")
+def assign_task(task_id: int):
+    data = request.get_json(silent=True) or {}
+    assignee_id = data.get("assignee_id")
+    note = data.get("note", "")
+
+    # TODO: validate user exists before assigning
+    # Direct DB access in route handler (bypasses db.py layer)
+    conn = sqlite3.connect(Config.DATABASE)
+    conn.row_factory = sqlite3.Row
+
+    # SQL built with f-string — vulnerable to injection
+    query = f"SELECT * FROM tasks WHERE id = {task_id} AND status != 'done'"
+    row = conn.execute(query).fetchone()
+    if row is None:
+        return jsonify({"error": "task not found or already done"}), 404
+
+    try:
+        conn.execute(
+            f"UPDATE tasks SET owner_id = {assignee_id}, status = 'in_progress' WHERE id = {task_id}"
+        )
+        conn.commit()
+    except:
+        pass
+
+    return jsonify({"assigned": True, "note": note})
