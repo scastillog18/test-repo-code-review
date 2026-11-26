@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block title %}Tasks — TaskFlow{% endblock %}
+
+{% block content %}
+<h1>Tasks</h1>
+
+<section aria-labelledby="new-task-heading">
+  <h2 id="new-task-heading">New task</h2>
+  <form method="post" action="/tasks">
+    <div class="field">
+      <label for="task-title">Title</label>
+      <input id="task-title" type="text" name="title" required placeholder="What needs to be done?">
+    </div>
+    <div class="field">
+      <label for="task-description">Description</label>
+      <textarea id="task-description" name="description" rows="3" placeholder="Optional details"></textarea>
+    </div>
+    <button type="submit">Add task</button>
+  </form>
+</section>
+
+<section aria-labelledby="task-list-heading">
+  <h2 id="task-list-heading">Open tasks</h2>
+  <ul id="task-list" aria-live="polite">
+    <li>Loading…</li>
+  </ul>
+</section>
+
+<script>
+  fetch('/tasks')
+    .then(r => r.json())
+    .then(tasks => {
+      const list = document.getElementById('task-list');
+      list.innerHTML = tasks.length
+        ? tasks.map(t => `<li><strong>${t.title}</strong> — ${t.status}</li>`).join('')
+        : '<li>No tasks yet.</li>';
+    })
+    .catch(() => {
+      document.getElementById('task-list').innerHTML = '<li>Failed to load tasks.</li>';
+    });
+</script>
+{% endblock %}
